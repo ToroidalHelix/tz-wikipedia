@@ -1,0 +1,1175 @@
+#!/usr/bin/perl
+
+####################################
+# Instructions - don't do any of this as root
+# cd to wherever this program is and run it
+# ./create_tz_wiki_pages
+#  run diff -y on old and new files
+#  e.g.  diff /tmp/tz/wikipedia_original_List_of_tz_database_time_zones ./output/wikipedia_replacement_List_of_tz_database_time_zones.txt
+#  Carefully copy and paste from Notepad in to Wikipedia.  Don't copy from putty because tabs get converted to spaces
+#  Use the wikipedia tools to analyze the changes before comitting.
+####################################
+#
+# 
+
+use strict;
+use warnings;
+use utf8;
+use Cwd;
+
+use POSIX qw(strftime tzset mktime);
+use File::Path;
+use Getopt::Std;
+
+use open ':std', ':encoding(UTF-8)';
+
+if ( $> == 0 ){ 
+	print "There is no compelling reason to run this script as root. Aborting.\n";
+	exit;
+}
+
+my $tmp_dir="/tmp/tz";
+my $output_dir="./output";  # could harmlessly be changed to $tmp_dir/output, but I have my reasons for not doing so.
+
+my $main_wiki_page="List_of_tz_database_time_zones";
+
+my $en_dash="\x{2013}";
+my $thin_space="\x{2009}";
+my $dagger="\x{2020}";
+my $minus_sign="\x{2212}";
+
+my %options=(
+	f => 0, # Boolean. Force downloads from Wikipedia and Iana
+	n => 0, # Integer. Delay time change search by n days from today. Can be negative.
+);
+getopts("fn:", \%options);
+my $start_days=$options{n};
+print "start_days: $start_days\n";
+
+my $tz_version=$ARGV[0];
+#my $tz_build_dir;
+#my $tz_top_dir;
+if ( ! defined $tz_version || $tz_version eq "" || $tz_version =~ /^git/ || $tz_version =~ /^devel/ ){
+	$tz_version="devel";
+} elsif ($tz_version =~ /\d\d\d\d[a-z]+/ ){
+	1;
+} else {
+	print "tz_version ($tz_version) is unrecognized\n";
+	exit 1;
+}
+
+my $tz_build_dir= "$tmp_dir/tzdb-$tz_version";
+my $tz_top_dir="$tmp_dir/tz_top-$tz_version";
+print "TZ version: $tz_version\n";
+print "tz_build_dir: $tz_build_dir\n";
+print "tz_top_dir:   $tz_top_dir\n";
+print "wiki_output_dir: $output_dir\n";
+
+
+
+mkdir $tmp_dir;
+mkdir $output_dir;
+
+if ( $options{f} || ! -e "$tmp_dir/wikipedia_original_$main_wiki_page" ){
+	my $wiki_url='https://en.wikipedia.org/w/index.php?title=' . $main_wiki_page . '\&action=raw';
+	print "downloading from $wiki_url\n";
+	system("wget --no-use-server-timestamps -nv -O $tmp_dir/wikipedia_original_$main_wiki_page $wiki_url") == 0 or die "Could not download list from Wikipedia.";
+}
+
+if ( $options{f} || ! -e $tz_build_dir || ! -e $tz_top_dir ){
+
+	if ( -e $tz_build_dir ){
+		print "Removing old source directory: $tz_build_dir\n";
+		rmtree($tz_build_dir) or die "Could not delete source directory $tz_build_dir";
+	}
+	if ( -e $tz_top_dir ){
+		print "Removing old target directory: $tz_top_dir\n";
+		rmtree($tz_top_dir) or die "Could not delete target $tz_top_dir";
+	}
+
+	if ( $tz_version eq "devel" ){
+		system ("git -C $tmp_dir clone https://github.com/eggert/tz $tz_build_dir") == 0 or die "Could not do a git clone of source.";
+	} else {
+		my $source_file="tzdb-$tz_version.tar.lz";
+		my $source_url= "https://data.iana.org/time-zones/releases/$source_file";
+		unless ( -e "$tmp_dir/$source_file" ){
+			print "Downloading $source_url\n";
+			system ("wget --no-use-server-timestamps -nv -O $tmp_dir/$source_file $source_url") == 0 or die "Could not download $source_url.";
+		}
+		system ("tar --lzip -xf $tmp_dir/$source_file -C $tmp_dir") == 0 or die "Could not untar $source_file.";
+	}
+
+	my $cwd = getcwd;
+	chdir $tz_build_dir or die "Could not change to $tz_build_dir directory.";
+	system ("make TOPDIR=$tz_top_dir install") == 0 or die "Could not compile and install tzdata.";
+	chdir $cwd or die "Could not change to $cwd directory.";
+}
+print `$tz_top_dir/usr/sbin/zic --version`;
+
+my @source_file_list=qw{ factory africa antarctica asia australasia etcetera europe northamerica southamerica backward};
+my @region_list=qw{ Africa America Antarctica Asia Atlantic Australia Europe Indian Pacific Etc Other};
+my $top_of_page="";    # all text and wiki markup before the tables
+my $middle_of_page=""; # all text and wiki markup between tables 1 and 2
+my $bottom_of_page=""; # all text and wiki markup after the tables
+my @ZONE_LIST;
+my @CANONICAL_ZONE_LIST;
+my @LINK_ZONE_LIST;
+my %ZONES;
+
+
+# Hash of named time zones.  These are not tz zones.
+# The keys use plus or minus signs; no hyphens!
+# We cannot key only by the abbreviation because several abbreviations such as CST are not unique.
+my %named_time_zones=(
+	"−11:00.SST"  => "Samoa Standard Time",
+	"−10:00.HST"  => "Hawaiian Standard Time",
+	"−09:00.HDT"  => "Hawaiian Daylight Time",
+	"−09:00.AKST" => "Alaskan Standard Time",
+	"−08:00.AKDT" => "Alaskan Daylight Time",
+	"−08:00.PST"  => "Pacific Standard Time",
+	"−07:00.PDT"  => "Pacific Daylight Time",
+	"−07:00.MST"  => "Mountain Standard Time",
+	"−06:00.MDT"  => "Mountain Daylight Time",
+	"−06:00.CST"  => "Central Standard Time",
+	"−05:00.CST"  => "Cuba Standard Time",
+	"−05:00.CDT"  => "Central Daylight Time",
+	"−05:00.EST"  => "Eastern Standard Time",
+	"−04:00.EDT"  => "Eastern Daylight Time",
+	"−04:00.CDT"  => "Cuba Daylight Time",
+	"−04:00.AST"  => "Atlantic Standard Time",
+	"−03:00.ADT"  => "Atlantic Daylight Time",
+	"−03:30.NST"  => "Newfoundland Standard Time",
+	"−02:30.NDT"  => "Newfoundland Daylight Time",
+	"+00:00.GMT"  => "Greenwich Mean Time",
+	"+00:00.UTC"  => "Coordinated Universal Time",
+	"+00:00.WET"  => "Western European Time",
+	"+01:00.BST"  => "British Summer Time",
+	"+01:00.WEST" => "Western European Summer Time",
+	"+01:00.IST"  => "Irish Standard Time",
+	"+01:00.CET"  => "Central European Time",
+	"+02:00.CEST" => "Central European Summer Time",
+	"+01:00.MET"  => "Middle European Time",
+	"+01:00.WAT"  => "West Africa Time",
+	"+02:00.CAT"  => "Central Africa Time",
+	"+02:00.MEST" => "Middle European Summer Time",
+	"+02:00.EET"  => "Eastern European Time",
+	"+02:00.IST"  => "Israel Standard Time",
+	"+02:00.SAST" => "South African Standard Time",
+	"+03:00.EAT"  => "East Africa Time",
+	"+03:00.IDT"  => "Israel Daylight Time",
+	"+03:00.MSK"  => "Moscow Time",
+	"+03:00.EEST" => "Eastern European Summer Time",
+	"+05:00.PKT"  => "Pakistan Standard Time",
+	"+05:30.IST"  => "Indian Standard Time",
+	"+07:00.WIB"  => "Western Indonesia Time",
+	"+08:00.WITA" => "Central Indonesia Time",
+	"+08:00.PST"  => "Philippine Standard Time",
+	"+08:00.CST"  => "China Standard Time",
+	"+08:00.HKT"  => "Hong Kong Time",
+	"+08:00.AWST" => "Australian Western Standard Time",
+	"+09:00.WIT"  => "Eastern Indonesia Time",
+	"+09:00.JST"  => "Japanese Standard Time",
+	"+09:00.KST"  => "Korean Standard Time",
+	"+09:30.ACST" => "Australian Central Standard Time",
+	"+10:00.ChST" => "Chamorro Time Zone",
+	"+10:30.ACDT" => "Australian Central Daylight Time",
+	"+10:00.AEST" => "Australian Eastern Standard Time",
+	"+11:00.AEDT" => "Australian Eastern Daylight Time",
+	"+12:00.NZST" => "New Zealand Standard Time",
+	"+13:00.NZDT" => "New Zealand Daylight Time",
+);
+
+# Most of the ISO 3166 country codes can be pulled directly from zone1970.tab or zone.tab.
+# Unfortunately there are some "Link" zones that are not listed in zone.tab or zone1970.tab.
+# We can determine the country code for some of these Link zones by looking at the country code for the target zone.
+# But... if the target zone has more than one country code we cannot programtically pick the correct country code for the Link.
+# e.g. zone "Iceland" is not in zone1970.tab or zone.tab; it is linked to Africa/Abidjan. Africa/Abidjan has 12 listed country codes.
+# Thus we need to hard code country codes for Iceland and handful of other Link zones.
+my %hard_coded_country_codes=(
+	"Africa/Asmera"         => ["ER"], # Eritrea
+	"Africa/Timbuktu"       => ["ML"], # Mali
+	"America/Virgin"        => ["VI"], # United States Virgin Islands (not British Virgin Islands)
+	"Antarctica/South_Pole" => ["AQ"], # Antarctica
+	"Atlantic/Jan_Mayen"    => ["SJ"], # Svalbard and Jan Mayen (Norway)
+	"Europe/Belfast"        => ["GB"], # Great Britian and Northern Ireland
+	"NZ"                    => ["NZ"], # New Zealand
+	"GB"                    => ["GB"], # Great Britan and Northern Ireland
+	"GB-Eire"               => ["GB"], # Great Britan and Northern Ireland
+	"Pacific/Johnston"      => ["UM"], # United States Minor Outlying Islands
+	"Pacific/Samoa"         => ["AS"], # American Samoa
+	"US/Samoa"              => ["AS"], # American Samoa
+	"US/Hawaii"             => ["US"], # United States
+	"America/Coral_Harbour" => ["CA"], # Canada
+	"America/Montreal"      => ["CA"], # Canada
+	"Canada/Eastern"        => ["CA"], # Canada
+	"America/Thunder_Bay"   => ["CA"], # Canada
+	"America/Rainy_River"   => ["CA"], # Canada
+	"America/Nipigon"       => ["CA"], # Canada
+	"Singapore"		=> ["SG"], # Singapore
+	"US/Arizona"		=> ["US"], # Arizona
+	"Asia/Kashgar"		=> ["CN"], # China
+	"Asia/Rangoon"		=> ["MM"], # Myamar
+	"Iceland"		=> ["IS"], # Iceland
+	"Pacific/Ponape"	=> ["FM"], # Federated States of Micronesia
+	"Pacific/Truk"		=> ["FM"], # Federated States of Micronesia
+	"Pacific/Yap"		=> ["FM"], # Federated States of Micronesia
+	"Japan"			=> ["JP"], # Japan
+	### we have not tradititionally put country codes on HST, PST, CST, etc
+	"HST"			=> [], # US
+	"PST"			=> [], # US and Canada
+	"CST"			=> [], # US and Canada
+	"EST"			=> [], # US and Canada
+	"MST"			=> [], # US and Canada
+	"EET"			=> [], # US and Canada
+	"WET"			=> [], # US and Canada
+	"PST8PDT"		=> [], # US and Canada
+	"MST7MDT"		=> [], # US and Canada
+	"CST6CDT"		=> [], # US and Canada
+	"EST5EDT"		=> [], # US and Canada
+);
+
+
+# Parse source files and generate a list of Canonical zones and a list of Link zones
+for my $file ( @source_file_list ){
+	open (my $SOURCE_FILE_FH, "<", "$tz_build_dir/$file") or die "Cannot open rulefile $tz_build_dir/$file";
+	while ( my $line=<$SOURCE_FILE_FH>) {
+		my ($name,$zone_type,$target,$LIST);
+		if ( $line =~ /^Zone/ ){
+			$zone_type="Canonical";
+			$name=(split " ", $line,3)[1];
+			$LIST=\@CANONICAL_ZONE_LIST;
+		} elsif ( $line =~ /^Link/ ){
+			$zone_type="Link";
+			( $target, $name)=(split " ", $line,4)[1,2];
+			$LIST=\@LINK_ZONE_LIST;
+		} else {
+			next;
+		}
+
+		my $basename = (split /\//, $name)[-1];
+		my $html_id=uc($basename);  # used for html id property in intertable wiki links
+		$html_id =~ s/[^\w-]//g;    # get rid of characters that are not either word characters or hyphens
+		my $ZONE={
+			name    => $name,
+			basename  => $basename,
+			html_id => $html_id,      # only used for Canonical zones
+			type    => $zone_type,
+			data	=> {
+					 dst_offset=>{},
+					 std_offset=>{},
+			           },
+			rulefile=> $file,
+			iso_list => [],
+			comment => "",
+			geo => "",
+			links_to_this_zone => [], # only used for Canonical zones
+			target_name => $target,   # only used for Link zones
+		};
+		push @$LIST,$ZONE;
+		if ( exists $ZONES{$name} ) {
+			print qq{WARNING: Found duplicate zone: "$name"\n};
+		}
+		$ZONES{$name}=$ZONE;
+		#if ( $zone_type eq "Zone" ){
+		#	$ZONES_BY_BASENAME{$basename}=$ZONE;
+		#}
+	}
+	close $SOURCE_FILE_FH;
+}
+
+# Create links (references) between Canonical Zones and Link zones.
+for my $ZONE (@LINK_ZONE_LIST){
+	my $TARGET=$ZONES{$ZONE->{target_name}};
+	print STDERR qq{WARNING: Could not find target zone "$ZONE->{target_name}" for link "$ZONE->{name}"\n} unless ( $TARGET );
+	$ZONE->{link}=$TARGET;
+	$ZONE->{data}=$TARGET->{data};
+	push @{$TARGET->{links_to_this_zone}}, $ZONE;
+}
+
+# Merge the two lists (Canonical and Link) into a single sorted list.
+# The list is sorted alphabeticly by name.  Don't ask my why.
+@ZONE_LIST=sort { lc($a->{name}) cmp lc($b->{name}) } @CANONICAL_ZONE_LIST, @LINK_ZONE_LIST;
+
+
+
+# Parse the backzone file to find out which zones used to be canonical
+{
+	open (my $BACK_ZONE_FH, "<", "$tz_build_dir/backzone");
+	while ( my $line=<$BACK_ZONE_FH>){
+		next unless ( $line =~ /^Zone/ );
+		chomp $line;
+		my ( $Z, $name, $other)=split " ", $line,3;
+		if ( exists $ZONES{$name} && $ZONES{$name} ){
+			$ZONES{$name}{backzone}=1 # boolean 
+		}
+	}
+	close $BACK_ZONE_FH;
+}
+
+# zone1970 only contains canonical zones.
+{
+	open (my $ZONE1970TAB_FH, "<", "$tz_build_dir/zone1970.tab");
+	while ( my $line=<$ZONE1970TAB_FH>){
+		chomp $line;
+		next if $line =~ /^\#/ ;
+		my ($iso,$geo,$name,$comment)=split " ", $line,4;
+		my $ZONE=$ZONES{$name};
+		$ZONE->{"listed_in_zone1970.tab"}=1; # flag
+		$geo =~ s/-/−/g; # convert hyphen to minus
+		$ZONE->{geo}=$geo;
+		$ZONE->{comment}= $comment if ($comment);
+		# zone1970.tab allows multiple ISO country codes. First entry is primary.
+		push @{$ZONE->{iso_list}}, (split /,/, $iso); # first entry always matches the country of the zone's canonical name
+	}
+	close $ZONE1970TAB_FH;
+}
+
+
+# zone.tab is for backward compatibility only.
+# we parse it to get geo coordinates and comments for zones that we have not already determined geo coordinates and comments.
+{
+	#open ZONETAB_FH, "$tz_build_dir/zone.tab";
+	open (my $ZONETAB_FH, "<", "$tz_build_dir/zone.tab");
+	while ( my $line=<$ZONETAB_FH>){
+		chomp $line;
+		next if $line =~ /^\#/ ;
+		my ($iso,$geo,$name,$comment)=split " ", $line,4;
+		$geo =~ s/-/−/g; # convert hyphen to minus
+		my $ZONE=$ZONES{$name};
+		$ZONE->{geo}=$geo unless $ZONE->{geo};
+		$ZONE->{comment}=$comment if ( $comment && ! $ZONE->{comment} ); # prefer zone1970.tab comments 
+	
+		if ( $#{$ZONE->{iso_list}} >= 0 && $ZONE->{iso_list}[0] ne $iso ){
+			print "Primary country code for $ZONE->{name} differs between and zone.tab zone1970.tab\n";
+		}
+
+		# only use the iso entry from zone.tab if we don't already have one
+		
+		if ( $#{$ZONE->{iso_list}} == -1 ){
+			push @{$ZONE->{iso_list}}, $iso;
+		}
+	}
+	close $ZONETAB_FH;
+}
+
+
+
+
+# Parse the old Wikipedia page.  This is done for four reasons:
+# 1. We need to retrieve and reuse the notes in the last column of the main table.
+# 2. We want to retrieve and reuse any wiki links that may have been tied to the zone name in column 2 of the main table.
+# 3. We need to preserve everything above and below the tables.
+# 4. We can report chnages between old data nd new data which is useful for error and consistancy checks.
+{
+	# Nobody is claming that this parser is rebust!  But it works.
+	my $OLD_WIKI_DATA=[];
+	{
+		#system("wget --no-use-server-timestamps -nv -O $tmp_dir/Wikipedia_original_$main_wiki_page $wiki_url") == 0 or die "Could not download list from Wikipedia.";
+		my $filename="$tmp_dir/wikipedia_original_$main_wiki_page";
+		open (my $OLD_WIKI_FH, "<", $filename) or die "Could not open $filename";
+		my $ROW=undef;
+		my $state=0; # 0:top  1:table_1  2:between_tables_1_&_2  3:table_2  4: between_tables_2_&_3  5:table_3  6:end
+
+		while ( my $line = <$OLD_WIKI_FH>){
+			#print "XXX $line";
+			chomp $line;
+			next if ( $line =~ /table alignment/i );
+			next if ( $line =~ /sticky header/i );
+			if ( $state == 0 ){
+				if ( $line =~ /^\{\|/ ){
+					print STDERR "found start of table 1\n";
+					++$state;
+					$ROW=[];
+					push @$OLD_WIKI_DATA,$ROW;
+				} else {
+					$top_of_page.="$line\n";
+				}
+			} elsif ( $state == 1 ) {
+				if ( $line =~ /^\|\-/ ){
+					$ROW=[];
+					push @$OLD_WIKI_DATA,$ROW;
+					next;
+				} elsif ( $line =~ /^\|\}/ ){        # tables ends with "|}";
+					print STDERR "found end of table 1\n";
+					++$state;
+					$ROW=undef;
+				} elsif ( $line !~ /^\|/ ){
+					next;
+				}
+				#chomp $line;
+				$line =~ s/^\| *//; # get rid of leading "| "
+				push @$ROW,$line;
+			} elsif ( $state == 2 ) {
+				if ( $line =~ /^\{\|/ ){
+					print STDERR "found start of table 2\n";
+					++$state;
+				} else {
+					$middle_of_page.="$line\n";
+				}
+			} elsif ( $state == 3 ) {
+				if ( $line =~ /^\|\}/ ){
+					print STDERR "found end of table 2\n";
+					++$state;
+				}
+			} elsif ( $state == 4 ) {
+				if ( $line =~ /^\{\|/ ){
+					print STDERR "found start of table 3\n";
+					++$state;
+				}
+			} elsif ( $state == 5 ) {
+				if ( $line =~ /^\|\}/ ){
+					print STDERR "found end of table 3\n";
+					++$state;
+				}
+			} elsif ( $state == 6 ) {
+				$bottom_of_page.="$line\n";
+			} else {
+				die "Uh-Oh. Parse state > 6.\n";
+			}
+
+		}
+		unless ( $state == 6 ){
+			die "Failed to locate and/or parse all three wiki tables in $filename.\n";
+		}
+		close $OLD_WIKI_FH;
+		chomp $bottom_of_page; # Wiki formatting does not require a line feed on the last line
+	}
+
+	for my $ROW ( @$OLD_WIKI_DATA){
+		next if ( $#$ROW == -1 ); # skip empty rows
+		my $iso_codes=       shift(@$ROW);
+		my $name=            shift(@$ROW);
+		my $comment=         shift(@$ROW);
+		my $type=            shift(@$ROW);
+		my $std_offset=      shift(@$ROW);
+		my $dst_offset=      shift(@$ROW);
+		my $std_abbreviation=shift(@$ROW);
+		my $dst_abbreviation=  ($std_abbreviation =~ /colspan=2/) ? $std_abbreviation : shift(@$ROW);
+		my $rulefile=        shift(@$ROW);
+		my $wiki_notes=      shift(@$ROW);
+
+		my $ZONE;
+		{
+			$name =~ s/^.*\[\[(.*)\]\].*$/$1/;
+			my @fields=split '\|', $name;
+			my $wiki_link;
+			if ( $#fields == 1 ){
+				$wiki_link=$fields[0];
+				$name=$fields[1];
+			}
+			$ZONE=$ZONES{$name};
+			unless ( $ZONE ){
+				print "WARNING zone $name found in old table but not present in current database\n";
+				next;
+			}
+			$ZONE->{wiki_link}=$wiki_link;
+		}
+		{
+			$iso_codes =~ s/^.*data-sort-value=.+?\| *//;       # get rid of "data-sort-value=?| " if it exists
+			$ZONE->{old_iso_list}=[];
+			for my $iso ( split /\s*,\s*/, $iso_codes ){
+				$iso =~ s/^.*\[\[//;              # get rid of "[["
+				$iso =~ s/\]\].*$//;              # get rid of "]]"
+				my @fields=split '\|', $iso;;
+				if ( $#fields == 1 ){
+					$iso=$fields[1];
+				}
+				push @{$ZONE->{old_iso_list}}, $iso;
+			}
+			#$ZONE->{old_iso_wiki_links}=$iso_codes;
+			
+		}
+
+		{
+			$std_offset =~ s/^.*data-sort-value=.+?\| *//;       # get rid of "data-sort-value=?| " if it exists
+			$std_offset =~ s/^.*\[\[//;              # get rid of "[["
+			$std_offset =~ s/\]\].*$//;              # get rid of "]]"
+			$std_offset =~ s/^\s//;                  # get rid of leading white space if it exists
+			my @fields=split '\|', $std_offset;;
+			if ( $#fields == 1 ){
+				$std_offset=$fields[1];
+			}
+			$ZONE->{old_std_offset}=$std_offset;
+		}
+
+		{
+			$dst_offset =~ s/^.*data-sort-value=.+?\| *//;       # get rid of "data-sort-value=?| " if it exists
+			$dst_offset =~ s/^.*\[\[//;              # get rid of "[["
+			$dst_offset =~ s/\]\].*$//;              # get rid of "]]"
+			$dst_offset =~ s/^\s//;                  # get rid of leading white space if it exists
+			my @fields=split '\|', $dst_offset;;
+			if ( $#fields == 1 ){
+				$dst_offset=$fields[1];
+			}
+			$ZONE->{old_dst_offset}=$dst_offset;
+		}
+
+		{
+			$std_abbreviation =~ s/^.*colspan=2\|//;       # get rid of "colspan=2|" if it exists
+			$std_abbreviation =~ s/^.*\[\[//;              # get rid of "[["
+			$std_abbreviation =~ s/\]\].*$//;              # get rid of "]]"
+			$std_abbreviation =~ s/^\s//;                  # get rid of leading white space if it exists
+			my @fields=split '\|', $std_abbreviation;;
+			if ( $#fields == 1 ){
+				$std_abbreviation=$fields[1];
+			}
+			$ZONE->{old_std_abbreviation}=$std_abbreviation;
+		}
+		{
+			$dst_abbreviation =~ s/^.*colspan=2\|//;       # get rid of "colspan=2|" if it exists
+			$dst_abbreviation =~ s/^.*\[\[//;              # get rid of "[["
+			$dst_abbreviation =~ s/\]\].*$//;              # get rid of "]]"
+			$dst_abbreviation =~ s/^\s//;                  # get rid of leading white space if it exists
+			my @fields=split '\|', $dst_abbreviation;;
+			if ( $#fields == 1 ){
+				$dst_abbreviation=$fields[1];
+			}
+			$ZONE->{old_dst_abbreviation}=$dst_abbreviation;
+		}
+		{
+			$wiki_notes =~ s/^.*data-sort-value=.+?\| *//;       # get rid of "data-sort-value=?| " if it exists
+			$ZONE->{old_wiki_notes}=$wiki_notes;
+		}
+
+		$ZONE->{old_type}=$type;
+		$ZONE->{old_rulefile}=$rulefile;
+	}
+}
+
+# if the ZONE did not exist in the old table, we don't want to get a uninitialized value warnings
+for my $ZONE ( @ZONE_LIST ){
+	unless ( exists $ZONE->{old_type} ){
+		$ZONE->{old_iso_list}=[];
+		$ZONE->{old_wiki_notes}="";
+		$ZONE->{old_type}="Undefined";
+		$ZONE->{old_std_offset}="--:--";
+		$ZONE->{old_dst_offset}="--:--";
+		$ZONE->{old_std_abbreviation}="---";
+		$ZONE->{old_dst_abbreviation}="---";
+	}
+}
+
+############################################################
+# Get time offsets for the Canonical zones
+{
+	# Create a set of test timestamps... each 1 day (86400 seconds) apart and all starting at 00:00 UTC.
+	# The first timestamp is today... unless overriden with the -n option;
+	# The last timestamp is 365 days after the first timestamp;
+	# We will check for isdst flag for each and every timestamp.
+	$ENV{TZ}="UTC";
+	tzset;
+	my @dates;
+	{
+		my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime();
+		for my $i ( $start_days .. $start_days+365 ){
+			push @dates,mktime(0,0,0,$mday+$i,$mon,$year);
+		}
+	}
+
+
+	for my $ZONE ( @CANONICAL_ZONE_LIST ){
+		$ENV{TZ}="$tz_top_dir/usr/share/zoneinfo/$ZONE->{name}";
+		tzset;
+		for my $date (@dates){
+			my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime($date);
+			my $raw          = strftime ("%z", localtime($date)); # e.g. -0330, +0000, +0200
+			my $abbreviation = strftime ("%Z", localtime($date));
+			
+			# Only use the first dst or non-dst offets in the 1 year date range. Date range starts now unless modified with the -n option.
+			my $OFFSET_DATA= $isdst ? $ZONE->{data}{dst_offset} : $ZONE->{data}{std_offset};
+			if ( defined $OFFSET_DATA->{raw} ){
+				if ( $OFFSET_DATA->{raw} ne $raw ){
+					$OFFSET_DATA->{inconsistent}=1;
+				}
+			} else {
+				$OFFSET_DATA->{raw}         = $raw;
+				$OFFSET_DATA->{abbreviation}=$abbreviation;
+				$OFFSET_DATA->{inconsistent}=0;
+			}
+		}
+		if ( defined $ZONE->{data}{dst_offset}{raw} ){
+			$ZONE->{data}{observes_dst}=1;
+		} else {
+			$ZONE->{data}{dst_offset}=$ZONE->{data}{std_offset};
+		}
+
+	}
+}
+
+
+# Hate to to this but...
+# Switch summer and winter time for "Europe/Dublin";  we don't need to do it for "Eire" because Eire is a link that shares Dublin's data
+{
+	my $DUBLIN_DATA=$ZONES{"Europe/Dublin"}{data};
+	@{$DUBLIN_DATA}{"std_offset","dst_offset"}=@{$DUBLIN_DATA}{"dst_offset","std_offset"}
+}
+
+
+# process the zone abbrivations and offsets into multiple formats
+for my $ZONE ( @CANONICAL_ZONE_LIST ){
+	for my $OFFSET ( $ZONE->{data}{std_offset}, $ZONE->{data}{dst_offset} ){
+
+		my $raw_offset=$OFFSET->{raw};		  # offset string returned earlier by strftime %z (e.g. -0230 or +0200)
+		my $abbreviation=$OFFSET->{abbreviation}; # abbreviation returned earlier by strftime %Z  (NST or CEST)
+
+		{
+			my $offset_txt = $raw_offset;
+			$offset_txt =~ s/(.)(..)(..)/$1$2:$3/;   # Add colon.              e.g. -02:30 or +02:00
+			$offset_txt =~ s/-/$minus_sign/;          # Convert hyphen to minus e.g. −02:30 or +02:00
+			$OFFSET->{txt}=$offset_txt;
+			# lookup up full time zone string ( e.g. "Newfoundland Standard Time" or "Central Eurpean Standard Time" )
+			if ( exists $named_time_zones{$offset_txt . "." . $abbreviation} ) {
+				$OFFSET->{full_time_zone_name}=$named_time_zones{ $offset_txt . "." . $abbreviation};
+			} elsif ( $abbreviation =~ /[A-Z]/ || $abbreviation =~ /[a-z]/ ){
+				print "WARNING could not find full name for: $abbreviation for $ZONE->{name} with offset $offset_txt\n";
+			}
+		}
+
+		# convert raw offest to to a single numeric value in hours (with decimal place if required). This is used for sorting.
+		{
+			my ($sign,$H,$M)=$OFFSET->{raw} =~ /(.)(..)(..)/;
+			$H*= $sign eq "-" ? -1 : 1;
+			$M*= $sign eq "-" ? -1 : 1;
+			$OFFSET->{hours}=( sprintf "%.2f", $H+$M/60 ) + 0,     # e.g. -2.5 or 2 (negative numbers use hyphens)
+			$OFFSET->{seconds}=sprintf "%.0f", $H*3600+$M*60,      # e.g. -150 or 120 (negative numbers use hyphens)
+		}
+
+		# We used to use ± in the links
+		#if ( $OFFSET->{seconds} == 0 ){
+		#	$OFFSET->{wiki_link}="UTC±00:00";
+		#} else {
+		#	$OFFSET->{wiki_link}="UTC$OFFSET->{txt}";
+		#}
+		$OFFSET->{wiki_link}="UTC$OFFSET->{txt}";
+	}
+}
+
+# Assign country codes for special cases.  See definition of $hard_coded_country_codes above.
+# Also assign geographical coordinates for special cases
+for my $ZONE(@LINK_ZONE_LIST){
+	#next unless ( $ZONE->{type} eq "Link" );
+	next if ( @{$ZONE->{iso_list}} );
+	my $LINK=$ZONE->{link};
+	if ( exists $hard_coded_country_codes{$ZONE->{name}} ){
+		$ZONE->{iso_list}=$hard_coded_country_codes{$ZONE->{name}};
+	} elsif ( $#{$LINK->{iso_list}} == 0 ){ # exactly one entry
+		$ZONE->{iso_list}=$LINK->{iso_list};
+	}
+}
+
+# if two zones have the same basename we can copy the coordinates.
+for my $ZONE(@LINK_ZONE_LIST){
+	my $TARGET=$ZONE->{link};
+	#print qq{ZONE geo: $ZONE->{geo}\n};
+	unless ( $ZONE->{geo} ){
+		#print qq{checking $ZONE->{name} with basename $ZONE->{basename} with geo "$ZONE->{geo}"\n};
+		if ( $ZONE->{basename} eq $TARGET->{basename} && $TARGET->{geo} ){
+			$ZONE->{geo}=$TARGET->{geo};
+		}
+	}
+}
+
+$ZONES{"Asia/Calcutta"}{geo}=  $ZONES{"Asia/Kolkata"}{geo}    if ( $ZONES{"Asia/Kolkata"}{type}   eq "Canonical");
+$ZONES{"Asia/Katmandu"}{geo}=  $ZONES{"Asia/Kathmandu"}{geo}  if ( $ZONES{"Asia/Kathmandu"}{type} eq "Canonical");
+$ZONES{"Asia/Dacca"}{geo}=     $ZONES{"Asia/Dhaka"}{geo}      if ( $ZONES{"Asia/Dhaka"}{type}     eq "Canonical");
+$ZONES{"Europe/Kiev"}{geo}=    $ZONES{"Europe/Kyiv"}{geo}     if ( $ZONES{"Europe/Kyiv"}{type}    eq "Canonical");
+$ZONES{"Atlantic/Faeroe"}{geo}=$ZONES{"Atlantic/Faroe"}{geo}  if ( $ZONES{"Atlantic/Faroe"}{type} eq "Canonical");
+$ZONES{"Asia/Macao"}{geo}=     $ZONES{"Asia/Macau"}{geo}      if ( $ZONES{"Asia/Macau"}{type}     eq "Canonical");
+$ZONES{"Asia/Ashkhabad"}{geo}= $ZONES{"Asia/Ashgabat"}{geo}   if ( $ZONES{"Asia/Ashgabat"}{type}  eq "Canonical");
+$ZONES{"Hongkong"}{geo}=       $ZONES{"Asia/Hong_Kong"}{geo}  if ( $ZONES{"Asia/Hong_Kong"}{type} eq "Canonical");
+	
+
+# Define sort key for the last column
+# E.g. EST5EDT:         084096.est
+#      America/Toronto: 084096tor
+#      America/Nipigon: 084096tor.
+# Note this requires ISO codes so it is done after parsing zone.tab and zone1970.tab
+for my $ZONE ( @ZONE_LIST ){
+	my $sort_string;
+	next unless ( $ZONE->{type} eq "Canonical" );
+	$sort_string.=sprintf "%03.0f", ($ZONE->{data}{std_offset}{hours}+12)*12; # 5 minute increments starting with 0 fixed to UTC-12
+	$sort_string.=sprintf "%03.0f", ($ZONE->{data}{dst_offset}{hours}+12)*12; # 5 minute increments starting with 0 fixed to UTC-12
+	# We want canonical zones with no country code to be sorted before the other canonical zones with the same time offsets.
+	# e.g. we want "Etc/GMT+5" to appear before "America/Bogota"
+	# This can be achieved by adding a character that comes before "A" in ascii sort order.  A period does the trick.
+	unless ( $#{$ZONE->{iso_list}} >=0 ){
+		$sort_string.=".";
+	}
+	$sort_string.=lc(substr ($ZONE->{html_id},0,3));
+	$ZONE->{comment_sort_string}=$sort_string;
+
+	# All the non-canonical zones that link to this canonical zone get the same sort string with a single period appended to it.
+	# The result is that the links appear immediately after their target zone when sorted.
+	for my $LINK_ZONE ( @{$ZONE->{links_to_this_zone}} ){
+		$LINK_ZONE->{comment_sort_string}=$sort_string . ".";
+	}
+}
+
+# do some checking and generate a new note for the notes column if required.
+for my $ZONE ( @ZONE_LIST ){
+
+	$ZONE->{wiki_notes}=$ZONE->{old_wiki_notes};
+
+	# Check all wiki links in the notes column; any wiki link with a name that matches a Canonical Zone will be set to point to a section link.
+	# Yes this is convoluted and for now it is disabled.
+	if (0){
+		my @parts=split /(\[\[|\]\])/, $ZONE->{old_wiki_notes};
+
+		my $inside=0;
+		my $new_note="";
+		for my $part (@parts){
+			if ( $part eq '[[' ){
+				++$inside;
+				$new_note.= "$part";
+			} elsif ( $part eq ']]' ){
+				--$inside;
+				$new_note.= "$part";
+			} elsif (! $inside){
+				$new_note.= "$part";
+			} else {
+				my @fields=split '\|', $part;
+				my $name;
+				my $wiki_link;
+				if ( $#fields == 1 ){
+					$wiki_link=$fields[0];
+					$name=$fields[1];
+				} else {
+					$name=$fields[0];
+				}
+			
+				if ( exists $ZONES{$name} && exists $ZONES{$name}{html_id} ){
+					$new_note.= "#$ZONES{$name}{html_id}|$name";
+				} else {
+					$new_note.= $part;
+				}
+			}
+		}
+		$ZONE->{wiki_notes}=$new_note;
+	}
+
+	# For all Link entries, the notes column must start with "Link to [ID_OF_CANONICAL_ZONE]"
+	# If it does not, then purge the existing note and set it to "Link to.."
+	if ( $ZONE->{type} eq "Link" ) {
+		my $LINK=$ZONE->{link};
+		my $link_note="Link to [[#$LINK->{html_id}|$LINK->{name}]]";
+
+		# don't test using a regex with /^$link_note/ because $link_note contains square brackets 
+		# as of oct 9,2021,this has not been fully tested
+		if ( index($ZONE->{wiki_notes},$link_note) != 0){
+			print qq{WARNING: changing notes for $ZONE->{name} from "$ZONE->{wiki_notes}"  to  "$link_note"\n};
+			$ZONE->{wiki_notes}=$link_note;
+		}
+	}
+
+
+	if ( $ZONE->{type} eq "Canonical" && $ZONE->{wiki_notes} =~ /^Link/ ){
+		print "WARNING: removing wiki_notes Link description from Canonical zone $ZONE->{name}.\n";
+		$ZONE->{wiki_notes} = "";
+	}
+
+
+	# Compare old and new country codes. Note that perl converts lists to scalars for the comparison; there is no harm in that.
+	if ( @{$ZONE->{old_iso_list}} != @{$ZONE->{iso_list}} ) {
+		print qq{WARNING: $ZONE->{name} switched country codes from "@{$ZONE->{old_iso_list}}" to "@{$ZONE->{iso_list}}"\n};
+	}
+
+	# old_type may contain the string '{{su|p=†}}'. We ignore that for now and just check if the first part matches the expected type
+	if ( $ZONE->{old_type}  !~ /^$ZONE->{type}/ ) {
+		print "WARNING: $ZONE->{name} switched type from \"$ZONE->{old_type}\" to \"$ZONE->{type}\"\n";
+	}
+	if ( $ZONE->{type} eq "Canonical" && $ZONE->{backzone} ){
+		print "WARNING: $ZONE->{name} is Canonical but also appears in backzone!\n";
+	}
+
+	if ( $ZONE->{data}{std_offset}{abbreviation} ne $ZONE->{data}{dst_offset}{abbreviation} ){
+		if ( $ZONE->{data}{std_offset}{hours} == $ZONE->{data}{dst_offset}{hours} ){
+			print qq{NOTE: $ZONE->{name} abbreviations differ but offests are equal: $ZONE->{data}{std_offset}{txt} "$ZONE->{data}{std_offset}{abbreviation}" / $ZONE->{data}{dst_offset}{txt} "$ZONE->{data}{dst_offset}{abbreviation}".\n};
+		}
+	}
+
+	if ( $ZONE->{data}{std_offset}{abbreviation} eq $ZONE->{data}{dst_offset}{abbreviation} ){
+		if ( $ZONE->{data}{std_offset}{hours} != $ZONE->{data}{dst_offset}{hours} ){
+			print qq{WARNING: $ZONE->{name} abbreviations are the same but offests differ. $ZONE->{data}{std_offset}{txt} "$ZONE->{data}{std_offset}{abbreviation}" / $ZONE->{data}{dst_offset}{txt} "$ZONE->{data}{dst_offset}{abbreviation}".  This should not normally happen.\n};
+		}
+	}
+
+	# Check old and new offsets
+	if ( $ZONE->{old_std_offset} ne $ZONE->{data}{std_offset}{txt} ){
+		print qq{WARNING: $ZONE->{name} Standard Time changed from  $ZONE->{old_std_offset}  to  $ZONE->{data}{std_offset}{txt}\n};
+	}
+	if ( $ZONE->{old_dst_offset} ne $ZONE->{data}{dst_offset}{txt} ){
+		print qq{WARNING: $ZONE->{name} Daylight Time changed from  $ZONE->{old_dst_offset}  to  $ZONE->{data}{dst_offset}{txt}\n};
+	}
+
+	if ( $ZONE->{old_std_abbreviation} ne $ZONE->{data}{std_offset}{abbreviation} ){
+		print "WARNING: $ZONE->{name} Standard Time abbreviation changed from \"$ZONE->{old_std_abbreviation}\" to \"$ZONE->{data}{std_offset}{abbreviation}\" \n";
+	}
+	if ( $ZONE->{old_dst_abbreviation} ne $ZONE->{data}{dst_offset}{abbreviation} ){
+		print "WARNING: $ZONE->{name} Daylight Time abbreviation changed from \"$ZONE->{old_dst_abbreviation}\" to \"$ZONE->{data}{dst_offset}{abbreviation}\" \n";
+	}
+
+	# Display a warning if a zone has no country code (with some exceptions)
+	unless ( @{$ZONE->{iso_list}} ){
+		next if ( $ZONE->{name} =~ /GMT|UTC|UCT/ );
+		next if ( $ZONE->{name} =~ /Greenwich|Universal|Zulu|Factory/ );
+		next if ( $ZONE->{name} =~ /HST|PST|MST|CST|EST/ );
+		next if ( $ZONE->{name} =~ /WET|MET|CET|EET/ );
+		print "WARN zone $ZONE->{name} from $ZONE->{rulefile} has no ISO 3166-1 country code\n";
+	}
+
+	# Make sure that country codes for Links appear in the list of country codes for the target
+	if ( $ZONE->{type} eq "Link" ) {
+		#if ( $#{$ZONE->{iso_list}} >=0 ){
+			for my $iso ( @{$ZONE->{iso_list}} ){
+				unless ( grep /$iso/, @{$ZONE->{link}{iso_list}} ) {
+					print qq{WARNING: Country code "$iso" found in Link $ZONE->{name} not found in canonical target zone $ZONE->{link}{name}\n};
+				}
+			}
+		#}
+	}
+
+	# If a zone has two or more country codes, it generally means there are non-canonical zones linked to this zone
+	# Exception are:
+	#       Europe/Simferopol which lists both Russia (RU) and Ukraine (UA) due to territorial dispute
+	#	Asia/Dubai        which may be used by French Southern and Antarctic Lands (TF)
+	#	Asia/Bangkok      which may be used by parts of north Vietname (VN)
+	# Here we check to see if there are extra ISO codes that don't have matching links.
+	if ( $ZONE->{type} eq "Canonical" ){
+		# Check all country codes except for the first one because the first one applies to the canonical zone.
+		# This loop won't itterate unless there are two or more country codes.
+		for my $i ( 1 .. $#{$ZONE->{iso_list}} ){
+			my $iso=$ZONE->{iso_list}[$i];
+			unless ( grep /$iso/, (map {@{$_->{iso_list}}} @{$ZONE->{links_to_this_zone}}) ) {
+				next if ( $ZONE->{name} eq "Europe/Simferopol" && $iso eq "UA" );
+				next if ( $ZONE->{name} eq "Asia/Dubai"        && $iso eq "TF" );
+				next if ( $ZONE->{name} eq "Asia/Bangkok"      && $iso eq "VN" );
+				print qq{WARNING: Country code "$iso" found in canonical zone $ZONE->{name} not found in any linked zones\n};
+			}
+		}
+	}
+
+	if ( $ZONE->{data}{std_offset}{inconsistent} ){
+		print "WARNING: $ZONE->{name} will undergo a future change to definition of standard time\n";
+	}
+	if ( $ZONE->{data}{dst_offset}{inconsistent} ){
+		print "WARNING: $ZONE->{name} will undergo a future change to definition of daylight time\n";
+	}
+}
+
+
+# Generate the entire "List_of_tz_database_time_zones" english wikipedia page
+{
+	my $filename="$output_dir/wikipedia_replacement_$main_wiki_page.txt";
+	open (my $NEW_WIKI_FH, ">", $filename) or die "Could not open $filename";
+	select $NEW_WIKI_FH;
+	print $top_of_page;
+
+	print "{{Sticky header}}\n";
+	# table headers
+	print "{|class=\"wikitable sortable sticky-header-multi\"\n";
+	print "!rowspan=2| [[ISO 3166 2-character country code|Country code(s)]]\n";
+	print "!rowspan=2| TZ identifier\n";
+	print "!rowspan=2| Embedded comments\n";
+	print "!rowspan=2| Type\n";
+	print "!colspan=2| UTC offset<br/>±hh:mm\n";
+	print "!colspan=2| Time zone<br/>abbreviations\n";
+	print "!rowspan=2| Source<br/>file\n";
+	print "!rowspan=2| Notes\n";
+	print "|-\n";
+	print "! SDT\n";
+	print "! DST\n";
+	print "! SDT\n";
+	print "! DST\n";
+
+	for my $ZONE ( @ZONE_LIST ){
+		my $STD_OFFSET=$ZONE->{data}{std_offset};
+		my $DST_OFFSET=$ZONE->{data}{dst_offset};
+	
+		if ( $ZONE->{type} eq "Canonical" ){
+			print qq{|- id="$ZONE->{html_id}" style="background-color:#f7fcf7;"\n}; # green
+		} else {
+			print qq{|- style="background-color:#fdf5f5;"\n}; # red
+		}
+	
+	
+		# Column 1:  ISO 3166 country code
+		# If there are two or more country codes we only want to use the first value when sorting.
+		# e.g. "CA" and "CA, BS" should have equal weights when sorting.
+		if ( $#{$ZONE->{iso_list}} >=1 ){
+			print "|data-sort-value=$ZONE->{iso_list}[0]";
+		}
+		print "| " . (join ",$thin_space", map {"[[ISO 3166-1:$_|$_]]"} @{$ZONE->{iso_list}}) . "\n";
+	
+		# Column 2:  Zone name
+		if ($ZONE->{wiki_link} ){
+			print "| [[$ZONE->{wiki_link}|$ZONE->{name}]]\n";
+		} else {
+			print "| [[$ZONE->{name}]]\n";
+		}
+	
+		# Column 3:  Area description
+		if ( $ZONE->{comment} ){
+			print "| $ZONE->{comment}\n";
+		} else {
+			print "| \n";
+		}
+	
+		# Column 4:  Zone type (Canonical or Link)
+		if ( $ZONE->{backzone} ){
+			print "| $ZONE->{type}" . '{{su|p=' . $dagger . '}}' . "\n";
+		} else {
+			print "| $ZONE->{type}\n";
+		}
+	
+		# Columns 5 & 6:  Time zone offsets from UTC time... with colspan=2
+		if (1){
+			for my $OFFSET ($STD_OFFSET,$DST_OFFSET){
+				my $txt= $OFFSET->{inconsistent} ? qq{''$OFFSET->{txt}''} : $OFFSET->{txt}; # choose italics or not
+				my @cell_format;
+				###push @cell_format, qq{colspan=2} unless ($ZONE->{data}{observes_dst});
+				push @cell_format, qq{data-sort-value=$OFFSET->{hours}};
+
+				if ( $OFFSET->{inconsistent} ){
+					if ( $ZONE->{type} eq "Canonical" ){
+						push @cell_format, qq{style="background-color:#eff4ef"};
+					} else {
+						push @cell_format, qq{style="background-color:#f5eded"};
+					}
+				}
+				print qq{|} . ( join " ", @cell_format ) . qq {| [[$OFFSET->{wiki_link}|$txt]]\n};
+
+				###last unless ( $ZONE->{data}{observes_dst} );
+			}
+		}
+	
+	
+		# Columns 7 & 8:  Time zone abbreviations. Wiki links are added for all non-numeric time zones.
+		# The wiki links use the full (unabbreviated) name which is usually in English.
+		# The two columns are mergred for zones that do not observe daylight saving
+		if (1){
+			for my $OFFSET ($STD_OFFSET,$DST_OFFSET){
+				my $txt= $OFFSET->{inconsistent} ? qq{''$OFFSET->{abbreviation}''} : $OFFSET->{abbreviation}; # choose italics or not
+				my @cell_format;
+				push @cell_format, qq{colspan=2} unless ($ZONE->{data}{observes_dst});
+
+				if ( $OFFSET->{inconsistent} ){
+					if ( $ZONE->{type} eq "Canonical" ){
+						push @cell_format, qq{style="background-color:#eff4ef"};
+					} else {
+						push @cell_format, qq{style="background-color:#f5eded"};
+					}
+				}
+				print qq{|} . ( join " ", @cell_format ) if ( @cell_format );
+
+				if ( $OFFSET->{full_time_zone_name} ){
+					print qq {| [[$OFFSET->{full_time_zone_name}|$txt]]\n};
+				} else {
+					print qq {| $txt\n};
+				}
+
+				last unless ( $ZONE->{data}{observes_dst} );
+			}
+		}
+
+		# Column 9:  Rule file a.k.a. source file
+		print "| $ZONE->{rulefile}\n";
+	
+		# Column 10:  Notes
+		if ( $ZONE->{wiki_notes} ){
+			print "|data-sort-value=$ZONE->{comment_sort_string}| $ZONE->{wiki_notes}\n";
+		} else {
+			print "|data-sort-value=$ZONE->{comment_sort_string}| \n";
+		}
+	}
+	print "|}\n"; # end of table 1
+	
+	print $middle_of_page;
+	
+	my %rulefile_counters=map {$_,{Canonical=>0,Link=>0,total=>0}} @source_file_list;;
+	for my $ZONE ( @ZONE_LIST ){
+		my $name=$ZONE->{name};
+		my $rulefile=$ZONE->{rulefile};
+		if ( exists $rulefile_counters{$rulefile} ){
+			++$rulefile_counters{$rulefile}{total};
+			++$rulefile_counters{$rulefile}{$ZONE->{type}};
+		} else {
+			++$rulefile_counters{Other}{total};
+			++$rulefile_counters{Other}{$ZONE->{type}};
+		}
+		++$rulefile_counters{Totals}{total};
+		++$rulefile_counters{Totals}{$ZONE->{type}};
+	}
+	
+	my %region_counters=map {$_,{Canonical=>0,Link=>0,total=>0}} @region_list;;
+	for my $ZONE ( @ZONE_LIST ){
+		my $name=$ZONE->{name};
+		my $region=(split "/", $name)[0];
+		if ( exists $region_counters{$region} ){
+			++$region_counters{$region}{total};
+			++$region_counters{$region}{$ZONE->{type}};
+		} else {
+			++$region_counters{Other}{total};
+			++$region_counters{Other}{$ZONE->{type}};
+		}
+		++$region_counters{Totals}{total};
+		++$region_counters{Totals}{$ZONE->{type}};
+	}
+	
+	{
+		# TABLE 2
+		print "{{Table alignment}}\n";
+		print '{| class="wikitable sortable defaultright col1left"' . "\n";
+		print "|+Number of zones / links by region\n";
+		print "!Region\n";
+		print "!Zones\n";
+		print "!Links\n";
+		print "!'''Total'''\n";
+		for my $region ( @region_list ){
+			print "|-\n";
+			print "| $region";
+			print "||$region_counters{$region}{Canonical}";
+			print "||$region_counters{$region}{Link}";
+			print "||$region_counters{$region}{total}";
+			print "\n";
+		}
+		#print "total $region_counters{Totals}{total}\n";
+		print "|-\n";
+		print "| '''Total'''";
+		print "||'''$region_counters{Totals}{Canonical}'''";
+		print "||'''$region_counters{Totals}{Link}'''";
+		print "||'''$region_counters{Totals}{total}'''";
+		print "\n";
+		print "|}\n"; # end of table 2
+	}
+	print "\n"; # one blank line between tables 2 and 3
+	{
+		# TABLE 3
+		print "{{Table alignment}}\n";
+		print '{| class="wikitable sortable defaultright col1left"' . "\n";
+		#ttt
+
+		print "|+Number of zones / links by source file\n";
+		print "!Source<br>File\n";
+		print "!Zones\n";
+		print "!Links\n";
+		print "!'''Total'''\n";
+	
+		for my $rulefile ( @source_file_list ){
+			print "|-\n";
+			print "| $rulefile";
+			print "||$rulefile_counters{$rulefile}{Canonical}";
+			print "||$rulefile_counters{$rulefile}{Link}";
+			print "||$rulefile_counters{$rulefile}{total}";
+			print "\n";
+		}
+		#print "total $rulefile_counters{Totals}{total}\n";
+		print "|-\n";
+		print "| '''Total'''";
+		print "||'''$rulefile_counters{Totals}{Canonical}'''";
+		print "||'''$rulefile_counters{Totals}{Link}'''";
+		print "||'''$rulefile_counters{Totals}{total}'''";
+		print "\n";
+		print "|}\n"; # end of table 3
+	}
+	
+	print $bottom_of_page;
+	close $NEW_WIKI_FH;
+	select STDOUT;
+}
+
+# Generate the entire "Time_zone/utc_offset" english wikipedia template.
+# https://en.wikipedia.org/wiki/Template:Time_zone/utc_offset
+{
+	my $filename="$output_dir/wikipedia_replacement_TZ_utc_offset.txt";
+	open (my $UTC_STD_OFFSET, ">", $filename) or die "Could not open $filename";
+	print $UTC_STD_OFFSET "<includeonly>{{#switch:{{{1|}}}\n";
+	for my $ZONE ( @ZONE_LIST ){
+		print $UTC_STD_OFFSET "| $ZONE->{name}\t=\t$ZONE->{data}{std_offset}{txt}\n";
+	}
+	print $UTC_STD_OFFSET "| #default = Time zone {{{1|(null)}}} is not in {{tl|Tz/utc offset}}.\n";
+	print $UTC_STD_OFFSET "}}</includeonly><noinclude>Info about [[tz database]] data storage in Wikipedia can be found at {{tl|Tz/doc#tz database}}.</noinclude>";
+	close $UTC_STD_OFFSET;
+}
+
+# Generate the entire "Time_zone/utc_dst_offset" english wikipedia template.
+# https://en.wikipedia.org/wiki/Template:Time_zone/utc_dst_offset
+{
+	my $filename="$output_dir/wikipedia_replacement_TZ_utc_dst_offset.txt";
+	open (my $UTC_DST_OFFSET, ">", $filename) or die "Could not open $filename";
+	print $UTC_DST_OFFSET "<includeonly>{{#switch:{{{1|}}}\n";
+	for my $ZONE ( @ZONE_LIST ){
+		print $UTC_DST_OFFSET "| $ZONE->{name}\t=\t$ZONE->{data}{dst_offset}{txt}\n";
+	}
+	print $UTC_DST_OFFSET "| #default = Time zone {{{1|(null)}}} is not in {{tl|Tz/utc dst offset}}.\n";
+	print $UTC_DST_OFFSET "}}</includeonly><noinclude>Info about [[tz database]] data storage in Wikipedia can be found at {{tl|Tz/doc#tz database}}.</noinclude>";
+	close $UTC_DST_OFFSET;
+}
+
+# Generate the entire "Time_zone/country_code" english wikipedia template.
+# https://en.wikipedia.org/wiki/Template:Time_zone/country_code
+{
+	my $filename="$output_dir/wikipedia_replacement_TZ_country_code.txt";
+	open (my $COUNTRY_CODE, ">", $filename) or die "Could not open $filename";
+	print $COUNTRY_CODE "<includeonly>{{#switch:{{{1|}}}\n";
+	for my $ZONE ( @ZONE_LIST ){
+		if ( $#{$ZONE->{iso_list}} >=0 ){
+			print $COUNTRY_CODE "| $ZONE->{name}\t=\t$ZONE->{iso_list}[0]\n";
+		} else {
+			print $COUNTRY_CODE "| $ZONE->{name}\t=\t--\n";
+		}
+	}
+	print $COUNTRY_CODE "| #default = Time zone {{{1|(null)}}} is not in [[Template:Time zone/country code]]\n";
+	print $COUNTRY_CODE "}}</includeonly><noinclude>Info about [[tz database]] data storage in Wikipedia can be found at [[Template:Time zone/doc#tz database]].</noinclude>";
+	close $COUNTRY_CODE;
+}
+
+# Generate the entire "Time_zone/coordinates" english wikipedia template.
+# https://en.wikipedia.org/wiki/Template:Time_zone/coordinates
+{
+	my $filename="$output_dir/wikipedia_replacement_TZ_coordinates.txt";
+	open (my $GEO, ">", $filename) or die "Could not open $filename";
+	print $GEO "<includeonly>{{#switch:{{{1|}}}<!-- Whitespace after = sign are filled for precise coordinates that contain seconds. -->\n";
+	for my $ZONE ( @ZONE_LIST ){
+		print $GEO "| $ZONE->{name}\t=\t$ZONE->{geo}\n";
+	}
+	print $GEO "| #default = Time zone {{{1|(null)}}} is not in [[Template:Time zone/coordinates]]\n";
+	print $GEO "}}</includeonly><noinclude>Info about [[tz database]] data storage in Wikipedia can be found at [[Template:Time zone/doc#tz database]].\n";
+	print $GEO "From zone.tab:\n";
+	print $GEO " # 2.  Latitude and longitude of the zone's principal location\n";
+	print $GEO " #     in [[ISO 6709]] sign-degrees-minutes-seconds format,\n";
+	print $GEO " #     either +-DDMM+-DDDMM or +-DDMMSS+-DDDMMSS,\n";
+	print $GEO " #     first latitude (+ is north), then longitude (+ is east).\n";
+	print $GEO "</noinclude>";
+	close $GEO;
+}
+
+
+# Generate the entire "Time_zone/comments" english wikipedia template.
+# https://en.wikipedia.org/wiki/Template:Time_zone/comments
+{
+	my $filename="$output_dir/wikipedia_replacement_TZ_comments.txt";
+	open (my $COMMENTS, ">", $filename) or die "Could not open $filename";
+	print $COMMENTS "<includeonly>{{#switch:{{{1|}}}\n";
+	for my $ZONE ( @ZONE_LIST ){
+		my $comment=$ZONE->{comment};
+		$comment =~ s/ -/&nbsp;$en_dash/;
+		print $COMMENTS "| $ZONE->{name}\t=\t$comment\n";
+	}
+	print $COMMENTS "| #default = Time zone {{{1|(null)}}} is not in {{tl|Tz/comments}}. \n";
+	print $COMMENTS "}}</includeonly><noinclude>Info about [[tz database]] data storage in Wikipedia can be found at {{tl|Tz/doc#tz database}}.</noinclude>";
+	close $COMMENTS;
+}
+
+
+# Generate the entire "Time_zone/rulefile" english wikipedia template.
+# https://en.wikipedia.org/wiki/Template:Time_zone/rulefile
+{
+	my $filename="$output_dir/wikipedia_replacement_TZ_rulefile.txt";
+	open (my $RULE_FILE, ">", $filename) or die "Could not open $filename";
+	print $RULE_FILE "<includeonly>{{#switch:{{{1|}}}\n";
+	for my $ZONE ( @ZONE_LIST ){
+		print $RULE_FILE "| $ZONE->{name}\t=\t$ZONE->{rulefile}\n";
+	}
+	print $RULE_FILE "}}</includeonly><noinclude>Info about [[IANA time zone database]] data storage in Wikipedia at [[Template:Tz/doc#IANA time zone database]].</noinclude>";
+	close $RULE_FILE;
+}
