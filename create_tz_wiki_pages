@@ -1156,7 +1156,10 @@ for my $ZONE ( @ZONE_LIST ){
 		print $COMMENTS "| $ZONE->{name}\t=\t$comment\n";
 	}
 	print $COMMENTS "| #default = Time zone {{{1|(null)}}} is not in {{tl|Tz/comments}}. \n";
-	print $COMMENTS "}}</includeonly><noinclude>Info about [[tz database]] data storage in Wikipedia can be found at {{tl|Tz/doc#tz database}}.</noinclude>";
+	print $COMMENTS "}}</includeonly><noinclude>\n";
+	print $COMMENTS "{{documentation}}\n";
+	print $COMMENTS "<!-- Add categories to the /doc subpage and add interwikis to Wikidata -->\n";
+	print $COMMENTS "</noinclude>";
 	close $COMMENTS;
 }
 
