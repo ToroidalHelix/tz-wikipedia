@@ -288,7 +288,7 @@ for my $ZONE (@LINK_ZONE_LIST){
 
 # Merge the two lists (Canonical and Link) into a single sorted list.
 # The list is sorted alphabeticly by name.  Don't ask my why.
-@ZONE_LIST=sort { lc($a->{name}) cmp lc($b->{name}) } @CANONICAL_ZONE_LIST, @LINK_ZONE_LIST;
+# @ZONE_LIST=sort { lc($a->{name}) cmp lc($b->{name}) } @CANONICAL_ZONE_LIST, @LINK_ZONE_LIST;
 
 
 
@@ -537,7 +537,8 @@ for my $ZONE (@LINK_ZONE_LIST){
 }
 
 # if the ZONE did not exist in the old table, we don't want to get a uninitialized value warnings
-for my $ZONE ( @ZONE_LIST ){
+#for my $ZONE ( @ZONE_LIST ){
+for my $ZONE ( @CANONICAL_ZONE_LIST, @LINK_ZONE_LIST ){
 	unless ( exists $ZONE->{old_type} ){
 		$ZONE->{old_iso_list}=[];
 		$ZONE->{old_wiki_notes}="";
@@ -684,9 +685,10 @@ $ZONES{"Hongkong"}{geo}=       $ZONES{"Asia/Hong_Kong"}{geo}  if ( $ZONES{"Asia/
 #      America/Toronto: 084096tor
 #      America/Nipigon: 084096tor.
 # Note this requires ISO codes so it is done after parsing zone.tab and zone1970.tab
-for my $ZONE ( @ZONE_LIST ){
+#for my $ZONE ( @ZONE_LIST ){
+for my $ZONE ( @CANONICAL_ZONE_LIST ){
 	my $sort_string;
-	next unless ( $ZONE->{type} eq "Canonical" );
+	#next unless ( $ZONE->{type} eq "Canonical" );
 	$sort_string.=sprintf "%03.0f", ($ZONE->{data}{std_offset}{hours}+12)*12; # 5 minute increments starting with 0 fixed to UTC-12
 	$sort_string.=sprintf "%03.0f", ($ZONE->{data}{dst_offset}{hours}+12)*12; # 5 minute increments starting with 0 fixed to UTC-12
 	# We want canonical zones with no country code to be sorted before the other canonical zones with the same time offsets.
@@ -706,7 +708,8 @@ for my $ZONE ( @ZONE_LIST ){
 }
 
 # do some checking and generate a new note for the notes column if required.
-for my $ZONE ( @ZONE_LIST ){
+#for my $ZONE ( @ZONE_LIST ){
+for my $ZONE ( @CANONICAL_ZONE_LIST, @LINK_ZONE_LIST ){
 
 	$ZONE->{wiki_notes}=$ZONE->{old_wiki_notes};
 
@@ -856,6 +859,11 @@ for my $ZONE ( @ZONE_LIST ){
 	}
 }
 
+# SORT
+# Merge the two lists (Canonical and Link) into a single sorted list.
+#@ZONE_LIST=sort { lc($a->{name}) cmp lc($b->{name}) } @CANONICAL_ZONE_LIST, @LINK_ZONE_LIST;
+@ZONE_LIST=sort { $a->{comment_sort_string} cmp $b->{comment_sort_string} } @CANONICAL_ZONE_LIST, @LINK_ZONE_LIST;
+
 
 # Generate the entire "List_of_tz_database_time_zones" english wikipedia page
 {
@@ -909,7 +917,10 @@ for my $ZONE ( @ZONE_LIST ){
 	
 		# Column 3:  Area description
 		if ( $ZONE->{comment} ){
-			print "| $ZONE->{comment}\n";
+			my $comment=$ZONE->{comment};
+			$comment =~ s/\s+\-\s+/{{dash}}/g;    # get rid of characters that are not either word characters or hyphens
+			#print "| $ZONE->{comment}\n";
+			print "| $comment\n";
 		} else {
 			print "| \n";
 		}
@@ -1019,7 +1030,7 @@ for my $ZONE ( @ZONE_LIST ){
 		# TABLE 2
 		print "{{Table alignment}}\n";
 		print '{| class="wikitable sortable defaultright col1left"' . "\n";
-		print "|+Number of zones / links by region\n";
+		print "|+Number of zones and links by region\n";
 		print "!Region\n";
 		print "!Zones\n";
 		print "!Links\n";
@@ -1048,8 +1059,10 @@ for my $ZONE ( @ZONE_LIST ){
 		print '{| class="wikitable sortable defaultright col1left"' . "\n";
 		#ttt
 
-		print "|+Number of zones / links by source file\n";
-		print "!Source<br>File\n";
+		#print "|+Number of zones / links by source file\n";
+		print "|+Number of zones and links by source file\n";
+		#print "!Source<br>File\n";
+		print "!File\n";
 		print "!Zones\n";
 		print "!Links\n";
 		print "!'''Total'''\n";
